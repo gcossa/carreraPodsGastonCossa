@@ -1,7 +1,7 @@
 import numpy as np
 import json
 from pydantic import BaseModel
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from typing import Union # Permite definir tipos de datos que pueden ser multiples
 
 # Coordenadas de posicionamiento de las antenas
@@ -9,7 +9,10 @@ antena0 = [-500, -200]
 antena1 = [100, -100] 
 antena2 = [500, 100] 
 
-def ObtenerPosicionPod(d1, d2, d3):
+def ObtenerPosicionPod(distancias):
+    for d in distancias:
+        if d < 0:
+            raise HTTPException(status_code=400, detail="Las distancias no pueden ser negativas")
     posAntena0, posAntena1, posAntena2 = np.array(antena0), np.array(antena1), np.array(antena2) # Las posiciones de las antenas se convierten en arrays de numpy para facilitar los calculos
     # Vectores entre antenas
     ejeX = (posAntena1 - posAntena0) / np.linalg.norm(posAntena1 - posAntena0)
@@ -18,14 +21,14 @@ def ObtenerPosicionPod(d1, d2, d3):
     d = np.linalg.norm(posAntena1 - posAntena0)
     j = np.dot(ejeY, posAntena2 - posAntena0)
     # Cálculo de coordenadas x e y
-    x = (d1**2 - d2**2 + d**2) / (2 * d)
-    y = ((d1**2 - d3**2 + i**2 + j**2) / (2 * j)) - (i / j) * x
+    x = (distancias[0]**2 - distancias[1]**2 + d**2) / (2 * d)
+    y = ((distancias[0]**2 - distancias[2]**2 + i**2 + j**2) / (2 * j)) - (i / j) * x
     # Posición final
     posNave = posAntena0 + x * ejeX + y * ejeY
     return round(float(posNave[0]),2), round(float(posNave[1]), 2)
 
 
-def ObtenerMetricasPod(*mensajes): # @mensajes es una lista de listas
+def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
     '''
     Consideraciones:
         - La unidad de la metrica tiene que ser congruente con la unidad de la metrica recibida, por lo tanto si 2 o mas mensajes tienen la misma mètrica con diferente unidad, se toma el valor cuya unidad es congruente con la metrica.
@@ -39,35 +42,36 @@ def ObtenerMetricasPod(*mensajes): # @mensajes es una lista de listas
     for i in range(cantidadMetricas):
         vectorMetricas = list(filter(lambda metrica: metrica != "" and metrica.endswith(unidadesMetricasValidas[i]), list(matrizMetricas[:, i]))) # [590C, 60%, 110C] >> [590C, 110C]
         print(vectorMetricas)
-        valoresMetricas = [metrica.replace(unidadesMetricasValidas[i], "") for metrica in vectorMetricas]
+        valoresMetricas = [metrica.replace(unidadesMetricasValidas[i], "") for metrica in vectorMetricas] #[590C, 110C] >> [590, 110]
         print(valoresMetricas)
         for valor in valoresMetricas:
             if valoresMetricas.count(valor) >= 2:  # Si 2 o mas antenas coinciden en el valor de la métrica
                 metricasObtenida.append(valor + unidadesMetricasValidas[i])
                 break
             else:
-                metricasObtenida.append("")
+                raise HTTPException(status_code=404, detail="No se pudo obtener una métrica válida")
     return metricasObtenida
 
 
 
 app = FastAPI()
 
-class InfoAntenas(BaseModel):
-    antenas = ({
-        "name": str,
-        "pod": str,
-        "distance": float,
-        "metrics": Union[str, None]
-    })
+class DatosAntena(BaseModel):
+    name: str
+    pod: str
+    distance: float
+    metrics: list[str]
 
-#TODO: Definir el modelo de datos para recibir la información del pod
+class InfoAntenas(BaseModel):
+    antenas: list[DatosAntena]
+
 @app.post("/podhealth/")
-async def infoPod(info: InfoAntenas):
-    dataPod = {"nombre": pod.nombre,
-               "ubicacion": ObtenerPosicionPod(*pod.distancias),
-               "metricas": ObtenerMetricasPod(*pod.infoEstados)
-              }
+async def infoPod(data: InfoAntenas):
+    posicionPodx, posicionPody = ObtenerPosicionPod([antena.distance for antena in data.antenas])
+    dataPod = {"pod": data.antenas[0].pod,
+                "position": {"x": posicionPodx, 
+                             "y": posicionPody},
+                "metrics": ObtenerMetricasPod([antena.metrics for antena in data.antenas])}
     return dataPod
 
 
