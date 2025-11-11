@@ -68,7 +68,7 @@ class InfoAntenas(BaseModel):
 class DataPod(BaseModel):
     pod: str
     distance: float
-    metrics: list[str]
+    message: list[str]
 
 infoAntenas = {}
 
@@ -83,15 +83,21 @@ async def InfoPod(data: InfoAntenas):
 
 @app.post("/podhealth_split/{antena_name}")
 async def GuardarInfoAntenaPod(antena_name:str, data: DataPod):
+    infoAntenas[antena_name] = {}
     infoAntenas[antena_name]['pod'] = data.pod  
     infoAntenas[antena_name]['distance'] = data.distance
-    infoAntenas[antena_name]['metrics'] = data.metrics
-    return {"message": f"Datos recibidos de la antena {antena_name}\n {data}"}
+    infoAntenas[antena_name]['message'] = data.message
+    return {"message": f"Información de la antena {antena_name} guardada correctamente", "data": data}
 
 @app.get("/podhealth_split/")
 async def ObtenerInfoPod():
+    if len(infoAntenas) < 3:
+        raise HTTPException(status_code=404, detail = f"No se han recibido datos de todas las antenas {infoAntenas}")
+    else:
+        listaAntenas = []
     for key in infoAntenas:
-        data = InfoAntenas(antenas= [DatosAntena(name=key, pod = infoAntenas[key]['pod'], distance = infoAntenas[key]['distance'], metrics = infoAntenas[key]['metrics'])])
-    return InfoPod(data)
+        listaAntenas. append(DatosAntena(name=key, pod = infoAntenas[key]['pod'], distance = infoAntenas[key]['distance'], metrics = infoAntenas[key]['message']))
+    data = InfoPod(InfoAntenas(antenas = listaAntenas))
+    return await data
     
 
