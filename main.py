@@ -1,6 +1,5 @@
 import numpy as np
 import json
-from requests import FastAPI, pydantic  
 
 # Coordenadas de posicionamiento de las antenas
 antena0 = [-500, -200] 

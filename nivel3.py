@@ -65,8 +65,15 @@ class DatosAntena(BaseModel):
 class InfoAntenas(BaseModel):
     antenas: list[DatosAntena]
 
+class DataPod(BaseModel):
+    pod: str
+    distance: float
+    metrics: list[str]
+
+infoAntenas = {}
+
 @app.post("/podhealth/")
-async def infoPod(data: InfoAntenas):
+async def InfoPod(data: InfoAntenas):
     posicionPodx, posicionPody = ObtenerPosicionPod([antena.distance for antena in data.antenas])
     dataPod = {"pod": data.antenas[0].pod,
                 "position": {"x": posicionPodx, 
@@ -74,4 +81,17 @@ async def infoPod(data: InfoAntenas):
                 "metrics": ObtenerMetricasPod([antena.metrics for antena in data.antenas])}
     return dataPod
 
+@app.post("/podhealth_split/{antena_name}")
+async def GuardarInfoAntenaPod(antena_name:str, data: DataPod):
+    infoAntenas[antena_name]['pod'] = data.pod  
+    infoAntenas[antena_name]['distance'] = data.distance
+    infoAntenas[antena_name]['metrics'] = data.metrics
+    return {"message": f"Datos recibidos de la antena {antena_name}\n {data}"}
+
+@app.get("/podhealth_split/")
+async def ObtenerInfoPod():
+    for key in infoAntenas:
+        data = InfoAntenas(antenas= [DatosAntena(name=key, pod = infoAntenas[key]['pod'], distance = infoAntenas[key]['distance'], metrics = infoAntenas[key]['metrics'])])
+    return InfoPod(data)
+    
 
