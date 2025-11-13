@@ -1,13 +1,23 @@
 import numpy as np
+import os
+import redis.asyncio as redis
 import json
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
-from typing import Union # Permite definir tipos de datos que pueden ser multiples
-
+from typing import Union 
 # Coordenadas de posicionamiento de las antenas
-antena0 = [-500, -200] 
-antena1 = [100, -100] 
-antena2 = [500, 100] 
+antena0 = [-500, -200]
+antena1 = [100, -100]
+antena2 = [500, 100]
+
+try:
+    redisCliente = redis.Redis(host = os.getenv("REDIS_HOST", "localhost"), 
+                port = 6379, 
+                db = 0, 
+                decode_responses = True)
+except:
+    print("No se pudo conectar con el servidor de Redis")
+    redisCliente = None
 
 def ObtenerPosicionPod(distancias):
     for d in distancias:
@@ -41,9 +51,7 @@ def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
     metricasObtenida = []
     for i in range(cantidadMetricas):
         vectorMetricas = list(filter(lambda metrica: metrica != "" and metrica.endswith(unidadesMetricasValidas[i]), list(matrizMetricas[:, i]))) # [590C, 60%, 110C] >> [590C, 110C]
-        print(vectorMetricas)
         valoresMetricas = [metrica.replace(unidadesMetricasValidas[i], "") for metrica in vectorMetricas] #[590C, 110C] >> [590, 110]
-        print(valoresMetricas)
         for valor in valoresMetricas:
             if valoresMetricas.count(valor) >= 2:  # Si 2 o mas antenas coinciden en el valor de la métrica
                 metricasObtenida.append(valor + unidadesMetricasValidas[i])
@@ -53,9 +61,7 @@ def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
     return metricasObtenida
 
 
-
 app = FastAPI()
-
 class DatosAntena(BaseModel):
     name: str
     pod: str
@@ -70,8 +76,8 @@ class DataPod(BaseModel):
     distance: float
     message: list[str]
 
-infoAntenas = {}
 
+    
 @app.post("/podhealth/")
 async def InfoPod(data: InfoAntenas):
     posicionPodx, posicionPody = ObtenerPosicionPod([antena.distance for antena in data.antenas])
@@ -83,21 +89,68 @@ async def InfoPod(data: InfoAntenas):
 
 @app.post("/podhealth_split/{antena_name}")
 async def GuardarInfoAntenaPod(antena_name:str, data: DataPod):
-    infoAntenas[antena_name] = {}
-    infoAntenas[antena_name]['pod'] = data.pod  
-    infoAntenas[antena_name]['distance'] = data.distance
-    infoAntenas[antena_name]['message'] = data.message
-    return {"message": f"Información de la antena {antena_name} guardada correctamente", "data": data}
+    if not redisCliente:
+        raise HTTPException(status_code=500, detail="No se pudo conectar con el servidor de Redis")
+    await redisCliente.hset(f"Pod: {data.pod}", antena_name, mapping = {"distance": data.distance,"message": json.dumps(data.message)}) #Ej: {"Pod":"Anakin Skywalker": {"antena0":{"distance": 250.5, "message": ["590C", "60%", "110C"]}}}
+    return  {"message" : f"Datos de antena {antena_name} almacenados en Redis para Pod '{data.pod}'",
+             "data": await redisCliente.hgetall(data.pod)}
 
-@app.get("/podhealth_split/")
-async def ObtenerInfoPod():
-    if len(infoAntenas) < 3:
-        raise HTTPException(status_code=404, detail = f"No se han recibido datos de todas las antenas {infoAntenas}")
-    else:
-        listaAntenas = []
+
+@app.get("/podhealth_split/{nombrePod}")
+async def ObtenerInfoPod(nombrePod: str):
+    # 1. Verificar si el Pod existe (si la clave Hash existe)
+    if not await redisCliente.exists(nombrePod):
+        raise HTTPException(status_code=404, detail=f"Pod '{nombrePod}' no encontrado en Redis.")
+    
+    #######################################################################
+    # 2. Obtener todos los campos (antenas) y valores del Hash
+    # Esto devuelve un dict: {b'antena0': b'{"distance":...}', b'antena1': ...}
+    datosGuardados = await redisCliente.hgetall(f"Pod:{nombrePod}")
+
+    
+    return datosGuardados
+    # 3. Verificar si tenemos los 3 fragmentos necesarios
+    if len(datosGuardados) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Datos incompletos para el Pod '{nombrePod}'. Solo se han recibido {len(datosGuardados)}/3 fragmentos."
+        )
+
+    # 4. Preparar los datos para las funciones de lógica
+    nombreAntenas = ['antena0', 'antena1', 'antena2']
+    distancias = []
+    metricas_fragmentos = []
+    
+    for nombreAntena in nombreAntenas:
+        claveAntena = nombreAntena.encode('utf-8') # Como los datos se guardaron en bytes, hay que codificar el string para buscar la clave correcta TODO: Analizar si es necesario
+        if claveAntena not in datosGuardados:
+             raise HTTPException(status_code=400, detail=f"Falta el fragmento clave: {nombreAntena}")
+        data = json.loads(datosGuardados[claveAntena]) # Deserializamos el string JSON (que está en bytes) a un dict de Python
+        distancias.append(data['distance'])
+        metricas_fragmentos.append(data['message'])
+        
+    # 5. Procesar y devolver la respuesta
+    posicionPodx, posicionPody = ObtenerPosicionPod(distancias)
+    metricas_finales = ObtenerMetricasPod(metricas_fragmentos)
+    
+    response_data = {
+        "pod": pod_name,
+        "position": {"x": posicionPodx, "y": posicionPody},
+        "metrics": metricas_finales
+    }
+    
+    # Opcional: Limpiar el Hash de Redis después de procesar
+    # await redis_client.delete(pod_name)
+    
+    #return response_data
+
+    ################################################################
+
+    
     for key in infoAntenas:
         listaAntenas. append(DatosAntena(name=key, pod = infoAntenas[key]['pod'], distance = infoAntenas[key]['distance'], metrics = infoAntenas[key]['message']))
     data = InfoPod(InfoAntenas(antenas = listaAntenas))
     return await data
     
+
 
