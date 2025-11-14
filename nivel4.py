@@ -3,33 +3,27 @@ import json
 import os
 import httpx # Importado para hacer llamadas HTTP a los jurados
 from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from typing import Union 
 import redis.asyncio as redis
 from google.cloud import tasks_v2 # Importado para Cloud Tasks
 from google.protobuf import timestamp_pb2
 import logging
 
-# --- Configuración de Logging ---
-# Google Cloud Run captura automáticamente los 'print()' y 'logging' a stdout/stderr
+# --- Variables ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# --- CONSTANTES DE CONFIGURACIÓN (¡RELLENAR ESTAS!) ---
 PROJECT_ID = os.getenv("PROJECT_ID", "carrera-pods-gcossa")
 QUEUE_ID = os.getenv("QUEUE_ID", "jurados-pods") 
 LOCATION_ID = os.getenv("LOCATION_ID", "us-central1")
-
-# ¡IMPORTANTE! Esta es la URL de tu propio servicio de Cloud Run
-# Cloud Tasks la necesita para saber a quién llamar (al worker)
-# Reemplaza esto con tu URL de Cloud Run
-SERVICE_URL = os.getenv("SERVICE_URL", "https://carrera-pods-api-79403090209.us-central1.run.app")
+                                        
+SERVICE_URL = os.getenv("SERVICE_URL", "https://carrera-pods-api-794893099209.us-central1.run.app") # Utilizada por Cloud Tasks para llamar al worker
 
 # Lista de los 3 servicios de jurados (URLs de ejemplo)
-JUROR_URLS = [
-    "https://jurado-1.intergalactico.com/api/v1/notificar",
-    "https://jurado-2.otro-planeta.com/v1/resultado",
-    "https://jurado-3.caotico.com/endpoint/recibir"
+urlsJurados = [
+    "https://jurado.uno.com/notificar",
+    "https://jurado.2.com/notificar",
+    "https://jurado.2.com/notificar"
 ]
 
 # Cliente de Cloud Tasks
@@ -40,7 +34,6 @@ try:
     task_queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION_ID, QUEUE_ID)
 except Exception as e:
     logger.error(f"No se pudo inicializar el cliente de Cloud Tasks: {e}")
-
 
 # Coordenadas de posicionamiento de las antenas
 antena0 = [-500, -200]
@@ -55,6 +48,8 @@ try:
 except:
     print("No se pudo conectar con el servidor de Redis")
     redisCliente = None
+
+# ----------- Funciones -----------
 
 def ObtenerPosicionPod(distancias):
     for d in distancias:
@@ -98,6 +93,7 @@ def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
     return metricasObtenida
 
 
+# ----------- FastAPI Endpoints -----------
 app = FastAPI()
 # Creamos un cliente HTTP global para reutilizar conexiones
 http_client = httpx.AsyncClient()
@@ -116,9 +112,8 @@ class DataPod(BaseModel):
     distance: float
     message: list[str]
 
-# --- ¡NUEVO MODELO PARA EL WORKER DE CLOUD TASKS! ---
-class JurorTask(BaseModel):
-    juror_url: str # La URL del jurado externo al que llamar
+class Jurado(BaseModel):
+    urlJurado: str # La URL del jurado externo al que llamar
     payload: dict  # El JSON (resultado) que debemos enviarles
 
 
@@ -144,11 +139,42 @@ async def GuardarInfoAntenaPod(antena_name:str, data: DataPod):
              "data": await redisCliente.hgetall(data.pod)}
 
 
+@app.post("/tasks/notificarJurado")
+async def notify_juror_worker(task: Jurado, request: Request):
+    
+    logger.info(f"Worker: Recibida tarea para notificar a {task.urlJurado}")
+    
+    try:
+        # Intentamos hacer el POST al jurado externo
+        response = await http_client.post(task.urlJurado, json=task.payload, timeout=10.0)
+        
+        # Si el jurado responde con error (4xx o 5xx), Cloud Tasks debe reintentar.
+        # Lanzamos un error para que Cloud Tasks lo sepa.
+        response.raise_for_status() 
+        
+        logger.info(f"Worker: Notificación a {task.urlJurado} exitosa (HTTP {response.status_code}).")
+        # Devolvemos un 200 OK a Cloud Tasks para que marque la tarea como completada
+        return {"status": "success", "juror_response": response.text}
+    
+    except httpx.TimeoutException:
+        logger.warning(f"Worker: Timeout al contactar a {task.urlJurado}. Reintentando...")
+        # Devolvemos un error 504 para que Cloud Tasks reintente
+        raise HTTPException(status_code=504, detail="Timeout del jurado externo")
+    except httpx.RequestError as e:
+        logger.warning(f"Worker: Error de conexión al contactar a {task.urlJurado}. Reintentando... Error: {e}")
+        # Devolvemos un 503 para que Cloud Tasks reintente
+        raise HTTPException(status_code=503, detail=f"Error de conexión del jurado externo: {e}")
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"Worker: El jurado {task.urlJurado} respondió con error HTTP {e.response.status_code}. Reintentando...")
+        # Devolvemos el mismo error que el jurado para que Cloud Tasks reintente
+        raise HTTPException(status_code=e.response.status_code, detail=f"El jurado devolvió un error: {e.response.text}")
+
+
+
 @app.get("/podhealth_split/{nombrePod}")
 async def ObtenerInfoPod(nombrePod: str):
     if not await redisCliente.exists(nombrePod):
         raise HTTPException(status_code=404, detail=f"Pod '{nombrePod}' no encontrado en Redis.")
-    
     datosPod = await redisCliente.hgetall(nombrePod)
     if len(datosPod) < 3:
         raise HTTPException(status_code=400, detail=f"No hay suficiente información recibida por las antenas para el pod '{nombrePod}'.")
@@ -158,8 +184,98 @@ async def ObtenerInfoPod(nombrePod: str):
     for antena in datosPodJSON:
         listaAntenas.append(DatosAntena(name=antena, pod=nombrePod, distance=datosPodJSON[antena]['distance'], metrics=datosPodJSON[antena]['message']))
 
-    datoPod = InfoPod(InfoAntenas(antenas = listaAntenas))
-    return await datoPod
+    datoPod = await InfoPod(InfoAntenas(antenas = listaAntenas))
+    if not tasks_client or not task_queue_path:
+        logger.error("El cliente de Cloud Tasks no está inicializado. No se encolarán tareas.")
+    else:
+        tasks_creadas = []
+        for urlJurado in urlsJurados:
+            try:
+                # Payload que Cloud Tasks enviará al worker
+                task_payload = Jurado(urlJurado=urlJurado, payload=datoPod).model_dump_json()
+                # Tarea que Cloud Tasks ejecutará
+                task = tasks_v2.Task(
+                    http_request=tasks_v2.HttpRequest(
+                        http_method=tasks_v2.HttpMethod.POST,
+                        url=f"{SERVICE_URL}/tasks/notificarJurado", 
+                        headers={"Content-Type": "application/json"},
+                        body=task_payload.encode('utf-8')
+                    )
+                )
+                created_task = tasks_client.create_task(parent=task_queue_path, task=task)
+                tasks_creadas.append(created_task.name)
+            except Exception as e:
+                logger.error(f"Error al crear la tarea para {urlJurado}: {e}")
+                tasks_creadas.append(f"ERROR: {e}")
+        
+        logger.info(f"Tareas encoladas para {nombrePod}: {tasks_creadas}")
+        datoPod["notificacion_jurados"] = {
+            "status": "Tareas de notificación encoladas.",
+            "tasks_info": tasks_creadas
+        }
+    return  datoPod
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 @app.get("/revisarRegis/")
