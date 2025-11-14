@@ -34,12 +34,6 @@ try:
     task_queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION_ID, QUEUE_ID)
 except Exception as e:
     logger.error(f"No se pudo inicializar el cliente de Cloud Tasks: {e}")
-
-# Coordenadas de posicionamiento de las antenas
-antena0 = [-500, -200]
-antena1 = [100, -100]
-antena2 = [500, 100]
-
 try:
     redisCliente = redis.Redis(host = os.getenv("REDIS_HOST", "localhost"), 
                 port = 6379, 
@@ -50,11 +44,33 @@ except:
     redisCliente = None
 
 # ------------------------- Funciones -------------------------------
-def ObtenerPosicionPod(distancias):
+async def ObtenerPosicionPod(antenas): # @antenas es una lista de listas de tipo DatosAntena
+    distancias = [antena[0].distance for antena in antenas]
+    antenasNombres = [antena[0].name for antena in antenas]
+    if not redisCliente:
+        raise HTTPException(status_code=503, detail="Servicio de Redis no disponible (cálculo de posición)")
+    logger.info(f"Buscando antenas en Redis: {antenasNombres}")
+    try:
+        # Obtenemos solo las antenas que necesitamos para este cálculo
+        posicionesAntenas = await redisCliente.hmget("antenas", antenasNombres) #Posiciones de las antenas elegidas ej: ["[250, 250]", "[500, 250]", "[250, 500]"]
+        if not posicionesAntenas or None in posicionesAntenas:
+             logger.error(f"No se encontraron todas las antenas ({antenasNombres}) en Redis. Datos: {posicionesAntenas}")
+             raise HTTPException(status_code=404, detail=f"No se encontraron todas las antenas ({antenasNombres}) en la configuración de Redis.")
+        
+        # Mapea las posiciones a los arrays de numpy
+        # Aseguramos el orden: posAntena0, posAntena1, posAntena2
+        posAntena0 = np.array(json.loads(posicionesAntenas[0]))
+        posAntena1 = np.array(json.loads(posicionesAntenas[1]))
+        posAntena2 = np.array(json.loads(posicionesAntenas[2]))
+        logger.info(f"Posiciones de antenas cargadas desde Redis.")
+
+    except Exception as e:
+        logger.error(f"Error al leer/parsear configuración de antenas desde Redis: {e}")
+        raise HTTPException(status_code=500, detail=f"Error al leer configuración de antenas de Redis: {e}")
+
     for d in distancias:
         if d < 0:
             raise HTTPException(status_code=400, detail="Las distancias no pueden ser negativas")
-    posAntena0, posAntena1, posAntena2 = np.array(antena0), np.array(antena1), np.array(antena2) # Las posiciones de las antenas se convierten en arrays de numpy para facilitar los calculos
     # Vectores entre antenas
     ejeX = (posAntena1 - posAntena0) / np.linalg.norm(posAntena1 - posAntena0)
     i = np.dot(ejeX, posAntena2 - posAntena0)
@@ -83,12 +99,14 @@ def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
     for i in range(cantidadMetricas):
         vectorMetricas = list(filter(lambda metrica: metrica != "" and metrica.endswith(unidadesMetricasValidas[i]), list(matrizMetricas[:, i]))) # [590C, 60%, 110C] >> [590C, 110C]
         valoresMetricas = [metrica.replace(unidadesMetricasValidas[i], "") for metrica in vectorMetricas] #[590C, 110C] >> [590, 110]
+        metricaDeterminada = False
         for valor in valoresMetricas:
             if valoresMetricas.count(valor) >= 2:  # Si 2 o mas antenas coinciden en el valor de la métrica
                 metricasObtenida.append(valor + unidadesMetricasValidas[i])
+                metricaDeterminada = True
                 break
-            else:
-                raise HTTPException(status_code=404, detail="No se pudieron determinar todas las métricas del POD debido a inconsistencias en los datos recibidos de las antenas.")
+        if metricaDeterminada == False:
+            metricasObtenida.append("")
     return metricasObtenida
 
 # -----------------  Modelos Pydantic -----------------
@@ -112,11 +130,15 @@ class Jurado(BaseModel):
     urlJurado: str # La URL del jurado externo al que llamar
     payload: dict  # El resultado que se le envia
 
+class Antena(BaseModel):
+    name: str
+    position: list[int, int]
 
  # ------------------ FastAPI Endpoints ---------------------
 @app.post("/podhealth/")
 async def InfoPod(data: InfoAntenas):
-    posicionPodx, posicionPody = ObtenerPosicionPod([antena.distance for antena in data.antenas])
+    
+    posicionPodx, posicionPody = await ObtenerPosicionPod([antena] for antena in data.antenas)
     dataPod = {"pod": data.antenas[0].pod,
                 "position": {"x": posicionPodx, 
                              "y": posicionPody},
@@ -197,77 +219,32 @@ async def ObtenerInfoPod(nombrePod: str):
         }
     return  datoPod
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-@app.get("/revisarRegis/")
-async def revisarRedis():
-    claves = await redisCliente.keys('*')
-    return {"claves_almacenadas": claves}
-
+@app.get("/datosCapturadosPod/{nombrePod}")
+async def RevisarRedis(nombrePod: str):
+    datosCapturadosParaPod = await redisCliente.hgetall(nombrePod)
+    return {"Pod": nombrePod,
+            "DatosCapturados": datosCapturadosParaPod}
+
+@app.post("/registrarAntena/")
+async def RegistrarAntena(antena: Antena):
+    if not redisCliente:
+        raise HTTPException(status_code=500, detail="No se pudo conectar con el servidor de Redis")
+    if await redisCliente.hexists("antenas", antena.name):
+        raise HTTPException(status_code=400, detail=f"La antena '{antena.name}' ya está registrada.")
+    await redisCliente.hset("antenas", antena.name, json.dumps(antena.position)) #Ej: {"antenas"->"antena0"->"position": [250, 250]}
+    return  {"message" : f"Datos de antena {antena.name} almacenados ",
+             "data": await redisCliente.hgetall("antenas")}
+       
+@app.delete("/eliminarAntena/{nombreAntena}")
+async def EliminarAntena(nombreAntena: str):    
+    if not await redisCliente.hexists("antenas", nombreAntena):
+        raise HTTPException(status_code=404, detail=f"Antena '{nombreAntena}' no encontrada.")
+    await redisCliente.hdel("antenas", nombreAntena) #Limpiar toda la indformación del Pod
+    return {"message": f"Antena '{nombreAntena}' eliminada de Redis."}
 
 @app.delete("/podhealth_split/{nombrePod}")
 async def EliminarInfoPod(nombrePod: str):    
     if not await redisCliente.exists(nombrePod):
         raise HTTPException(status_code=404, detail=f"Pod '{nombrePod}' no encontrado en Redis.")
     await redisCliente.delete(nombrePod) #Limpiar toda la indformación del Pod
+    return {"message": f"Información del Pod '{nombrePod}' eliminada de Redis."}
