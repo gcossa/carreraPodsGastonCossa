@@ -1,10 +1,47 @@
 import numpy as np
-import os
-import redis.asyncio as redis
 import json
+import os
+import httpx # Importado para hacer llamadas HTTP a los jurados
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
 from typing import Union 
+import redis.asyncio as redis
+from google.cloud import tasks_v2 # Importado para Cloud Tasks
+from google.protobuf import timestamp_pb2
+import logging
+
+# --- Configuración de Logging ---
+# Google Cloud Run captura automáticamente los 'print()' y 'logging' a stdout/stderr
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- CONSTANTES DE CONFIGURACIÓN (¡RELLENAR ESTAS!) ---
+PROJECT_ID = os.getenv("PROJECT_ID", "carrera-pods-gcossa")
+QUEUE_ID = os.getenv("QUEUE_ID", "jurados-pods") 
+LOCATION_ID = os.getenv("LOCATION_ID", "us-central1")
+
+# ¡IMPORTANTE! Esta es la URL de tu propio servicio de Cloud Run
+# Cloud Tasks la necesita para saber a quién llamar (al worker)
+# Reemplaza esto con tu URL de Cloud Run
+SERVICE_URL = os.getenv("SERVICE_URL", "https://carrera-pods-api-79403090209.us-central1.run.app")
+
+# Lista de los 3 servicios de jurados (URLs de ejemplo)
+JUROR_URLS = [
+    "https://jurado-1.intergalactico.com/api/v1/notificar",
+    "https://jurado-2.otro-planeta.com/v1/resultado",
+    "https://jurado-3.caotico.com/endpoint/recibir"
+]
+
+# Cliente de Cloud Tasks
+tasks_client = None
+task_queue_path = None
+try:
+    tasks_client = tasks_v2.CloudTasksClient()
+    task_queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION_ID, QUEUE_ID)
+except Exception as e:
+    logger.error(f"No se pudo inicializar el cliente de Cloud Tasks: {e}")
+
+
 # Coordenadas de posicionamiento de las antenas
 antena0 = [-500, -200]
 antena1 = [100, -100]
@@ -62,6 +99,9 @@ def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
 
 
 app = FastAPI()
+# Creamos un cliente HTTP global para reutilizar conexiones
+http_client = httpx.AsyncClient()
+
 class DatosAntena(BaseModel):
     name: str
     pod: str
@@ -76,8 +116,15 @@ class DataPod(BaseModel):
     distance: float
     message: list[str]
 
+# --- ¡NUEVO MODELO PARA EL WORKER DE CLOUD TASKS! ---
+class JurorTask(BaseModel):
+    juror_url: str # La URL del jurado externo al que llamar
+    payload: dict  # El JSON (resultado) que debemos enviarles
 
-    
+
+# Creamos un cliente HTTP global para reutilizar conexiones
+http_client = httpx.AsyncClient()
+
 @app.post("/podhealth/")
 async def InfoPod(data: InfoAntenas):
     posicionPodx, posicionPody = ObtenerPosicionPod([antena.distance for antena in data.antenas])
