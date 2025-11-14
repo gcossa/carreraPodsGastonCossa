@@ -10,23 +10,23 @@ from google.cloud import tasks_v2 # Importado para Cloud Tasks
 from google.protobuf import timestamp_pb2
 import logging
 
-# --- Variables ---
+# ------------------- Variables ---------------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 PROJECT_ID = os.getenv("PROJECT_ID", "carrera-pods-gcossa")
 QUEUE_ID = os.getenv("QUEUE_ID", "jurados-pods") 
-LOCATION_ID = os.getenv("LOCATION_ID", "us-central1")
-                                        
+LOCATION_ID = os.getenv("LOCATION_ID", "us-central1")                                
 SERVICE_URL = os.getenv("SERVICE_URL", "https://carrera-pods-api-794893099209.us-central1.run.app") # Utilizada por Cloud Tasks para llamar al worker
 
-# Lista de los 3 servicios de jurados (URLs de ejemplo)
+# Lista de los 3 servicios de jurados
 urlsJurados = [
     "https://jurado.uno.com/notificar",
-    "https://jurado.2.com/notificar",
-    "https://jurado.2.com/notificar"
+    "https://jurado.dos.com/notificar",
+    "https://jurado.tres.com/notificar"
 ]
 
 # Cliente de Cloud Tasks
+http_client = httpx.AsyncClient()
 tasks_client = None
 task_queue_path = None
 try:
@@ -49,8 +49,7 @@ except:
     print("No se pudo conectar con el servidor de Redis")
     redisCliente = None
 
-# ----------- Funciones -----------
-
+# ------------------------- Funciones -------------------------------
 def ObtenerPosicionPod(distancias):
     for d in distancias:
         if d < 0:
@@ -92,11 +91,8 @@ def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
                 raise HTTPException(status_code=404, detail="No se pudieron determinar todas las métricas del POD debido a inconsistencias en los datos recibidos de las antenas.")
     return metricasObtenida
 
-
-# ----------- FastAPI Endpoints -----------
+# -----------------  Modelos Pydantic -----------------
 app = FastAPI()
-# Creamos un cliente HTTP global para reutilizar conexiones
-http_client = httpx.AsyncClient()
 
 class DatosAntena(BaseModel):
     name: str
@@ -114,12 +110,10 @@ class DataPod(BaseModel):
 
 class Jurado(BaseModel):
     urlJurado: str # La URL del jurado externo al que llamar
-    payload: dict  # El JSON (resultado) que debemos enviarles
+    payload: dict  # El resultado que se le envia
 
 
-# Creamos un cliente HTTP global para reutilizar conexiones
-http_client = httpx.AsyncClient()
-
+ # ------------------ FastAPI Endpoints ---------------------
 @app.post("/podhealth/")
 async def InfoPod(data: InfoAntenas):
     posicionPodx, posicionPody = ObtenerPosicionPod([antena.distance for antena in data.antenas])
@@ -129,7 +123,6 @@ async def InfoPod(data: InfoAntenas):
                 "metrics": ObtenerMetricasPod([antena.metrics for antena in data.antenas])}
     return dataPod
 
-
 @app.post("/podhealth_split/{antena_name}")
 async def GuardarInfoAntenaPod(antena_name:str, data: DataPod):
     if not redisCliente:
@@ -138,24 +131,18 @@ async def GuardarInfoAntenaPod(antena_name:str, data: DataPod):
     return  {"message" : f"Datos de antena {antena_name} almacenados en Redis para Pod '{data.pod}'",
              "data": await redisCliente.hgetall(data.pod)}
 
-
 @app.post("/tasks/notificarJurado")
-async def notify_juror_worker(task: Jurado, request: Request):
-    
+async def notify_juror_worker(task: Jurado, request: Request): 
     logger.info(f"Worker: Recibida tarea para notificar a {task.urlJurado}")
-    
     try:
         # Intentamos hacer el POST al jurado externo
         response = await http_client.post(task.urlJurado, json=task.payload, timeout=10.0)
-        
         # Si el jurado responde con error (4xx o 5xx), Cloud Tasks debe reintentar.
         # Lanzamos un error para que Cloud Tasks lo sepa.
         response.raise_for_status() 
-        
         logger.info(f"Worker: Notificación a {task.urlJurado} exitosa (HTTP {response.status_code}).")
         # Devolvemos un 200 OK a Cloud Tasks para que marque la tarea como completada
         return {"status": "success", "juror_response": response.text}
-    
     except httpx.TimeoutException:
         logger.warning(f"Worker: Timeout al contactar a {task.urlJurado}. Reintentando...")
         # Devolvemos un error 504 para que Cloud Tasks reintente
@@ -169,8 +156,6 @@ async def notify_juror_worker(task: Jurado, request: Request):
         # Devolvemos el mismo error que el jurado para que Cloud Tasks reintente
         raise HTTPException(status_code=e.response.status_code, detail=f"El jurado devolvió un error: {e.response.text}")
 
-
-
 @app.get("/podhealth_split/{nombrePod}")
 async def ObtenerInfoPod(nombrePod: str):
     if not await redisCliente.exists(nombrePod):
@@ -179,11 +164,9 @@ async def ObtenerInfoPod(nombrePod: str):
     if len(datosPod) < 3:
         raise HTTPException(status_code=400, detail=f"No hay suficiente información recibida por las antenas para el pod '{nombrePod}'.")
     datosPodJSON = {antena: json.loads(data) for antena, data in datosPod.items()}
-
     listaAntenas = []
     for antena in datosPodJSON:
         listaAntenas.append(DatosAntena(name=antena, pod=nombrePod, distance=datosPodJSON[antena]['distance'], metrics=datosPodJSON[antena]['message']))
-
     datoPod = await InfoPod(InfoAntenas(antenas = listaAntenas))
     if not tasks_client or not task_queue_path:
         logger.error("El cliente de Cloud Tasks no está inicializado. No se encolarán tareas.")
@@ -191,8 +174,7 @@ async def ObtenerInfoPod(nombrePod: str):
         tasks_creadas = []
         for urlJurado in urlsJurados:
             try:
-                # Payload que Cloud Tasks enviará al worker
-                task_payload = Jurado(urlJurado=urlJurado, payload=datoPod).model_dump_json()
+                task_payload = Jurado(urlJurado = urlJurado, payload = datoPod).model_dump_json() # Payload que Cloud Tasks enviará al worker
                 # Tarea que Cloud Tasks ejecutará
                 task = tasks_v2.Task(
                     http_request=tasks_v2.HttpRequest(
