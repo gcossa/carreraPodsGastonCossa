@@ -1,0 +1,15 @@
+# Construir imagen 
+gcloud builds submit --tag gcr.io/carrera-pods-gcossa/carrera-pods
+
+# Listar VPC creados
+gcloud compute networks vpc-access connectors list --region us-central1
+
+# Crear VPC
+gcloud compute networks vpc-access connectors create carrera-pods-conector --region us-central1 --network default --range 10.8.0.0/28
+
+# Levantar el servicio de Redis
+gcloud run deploy carrera-pods-api --image gcr.io/carrera-pods-gcossa/carrera-pods --platform managed --region us-central1 --allow-unauthenticated --vpc-connector carrera-pods-conector --set-env-vars REDIS_HOST=10.2.0.3
+
+# Unificar todos los servicios (api, redis, vpc, task) 
+gcloud run deploy carrera-pods-api --image gcr.io/carrera-pods-gcossa/carrera-pods --platform managed --region us-central1 --allow-unauthenticated --vpc-connector carrera-pods-conector --set-env-vars REDIS_HOST=10.2.0.3,PROJECT_ID=carrera-pods-gcossa,QUEUE_ID=juror-queue,LOCATION_ID=us-central1,SERVICE_URL=https://carrera-pods-api-79403090209.us-central1.run.app
+
