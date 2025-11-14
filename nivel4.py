@@ -57,7 +57,7 @@ def ObtenerMetricasPod(mensajes): # @mensajes es una lista de listas
                 metricasObtenida.append(valor + unidadesMetricasValidas[i])
                 break
             else:
-                raise HTTPException(status_code=404, detail="No se pudo obtener una métrica válida")
+                raise HTTPException(status_code=404, detail="No se pudieron determinar todas las métricas del POD debido a inconsistencias en los datos recibidos de las antenas.")
     return metricasObtenida
 
 
@@ -126,4 +126,3 @@ async def EliminarInfoPod(nombrePod: str):
     if not await redisCliente.exists(nombrePod):
         raise HTTPException(status_code=404, detail=f"Pod '{nombrePod}' no encontrado en Redis.")
     await redisCliente.delete(nombrePod) #Limpiar toda la indformación del Pod
-    return {"message": f"Pod '{nombrePod}' y todos sus datos han sido eliminados de Redis."}
