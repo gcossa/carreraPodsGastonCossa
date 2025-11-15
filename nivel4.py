@@ -44,15 +44,14 @@ except:
     redisCliente = None
 
 # ------------------------- Funciones -------------------------------
-async def ObtenerPosicionPod(antenas): # @antenas es una lista de listas de tipo DatosAntena
-    distancias = [antena[0].distance for antena in antenas]
-    antenasNombres = [antena[0].name for antena in antenas]
+async def ObtenerPosicionPod(distancias, antenasNombres):
     if not redisCliente:
         raise HTTPException(status_code=503, detail="Servicio de Redis no disponible (cálculo de posición)")
     logger.info(f"Buscando antenas en Redis: {antenasNombres}")
     try:
         # Obtenemos solo las antenas que necesitamos para este cálculo
-        posicionesAntenas = await redisCliente.hmget("antenas", antenasNombres) #Posiciones de las antenas elegidas ej: ["[250, 250]", "[500, 250]", "[250, 500]"]
+        
+        posicionesAntenas = await redisCliente.hmget("antenas", *antenasNombres) #Posiciones de las antenas elegidas ej: ["[250, 250]", "[500, 250]", "[250, 500]"]
         if not posicionesAntenas or None in posicionesAntenas:
              logger.error(f"No se encontraron todas las antenas ({antenasNombres}) en Redis. Datos: {posicionesAntenas}")
              raise HTTPException(status_code=404, detail=f"No se encontraron todas las antenas ({antenasNombres}) en la configuración de Redis.")
@@ -137,8 +136,9 @@ class Antena(BaseModel):
  # ------------------ FastAPI Endpoints ---------------------
 @app.post("/podhealth/")
 async def InfoPod(data: InfoAntenas):
-    
-    posicionPodx, posicionPody = await ObtenerPosicionPod([antena] for antena in data.antenas)
+    distancias = [antena.distance for antena in data.antenas]
+    antenasNombres = [antena.name for antena in data.antenas]
+    posicionPodx, posicionPody = await ObtenerPosicionPod(distancias, antenasNombres)
     dataPod = {"pod": data.antenas[0].pod,
                 "position": {"x": posicionPodx, 
                              "y": posicionPody},
@@ -157,26 +157,19 @@ async def GuardarInfoAntenaPod(antena_name:str, data: DataPod):
 async def notify_juror_worker(task: Jurado, request: Request): 
     logger.info(f"Worker: Recibida tarea para notificar a {task.urlJurado}")
     try:
-        # Intentamos hacer el POST al jurado externo
-        response = await http_client.post(task.urlJurado, json=task.payload, timeout=10.0)
-        # Si el jurado responde con error (4xx o 5xx), Cloud Tasks debe reintentar.
-        # Lanzamos un error para que Cloud Tasks lo sepa.
-        response.raise_for_status() 
+        response = await http_client.post(task.urlJurado, json=task.payload, timeout=10.0) # Se intenta hacer el POST al jurado externo
+        response.raise_for_status() #Se lanza error a Cloud Task para que sepa que debe reintentar la tarea
         logger.info(f"Worker: Notificación a {task.urlJurado} exitosa (HTTP {response.status_code}).")
-        # Devolvemos un 200 OK a Cloud Tasks para que marque la tarea como completada
-        return {"status": "success", "juror_response": response.text}
+        return {"status": "success", "juror_response": response.text} # Devuelvo un 200 OK a Cloud Tasks para que marque la tarea como completada
     except httpx.TimeoutException:
         logger.warning(f"Worker: Timeout al contactar a {task.urlJurado}. Reintentando...")
-        # Devolvemos un error 504 para que Cloud Tasks reintente
-        raise HTTPException(status_code=504, detail="Timeout del jurado externo")
+        raise HTTPException(status_code=504, detail="Timeout del jurado externo") # Devuelvo un error 504 para que Cloud Tasks reintente
     except httpx.RequestError as e:
         logger.warning(f"Worker: Error de conexión al contactar a {task.urlJurado}. Reintentando... Error: {e}")
-        # Devolvemos un 503 para que Cloud Tasks reintente
-        raise HTTPException(status_code=503, detail=f"Error de conexión del jurado externo: {e}")
+        raise HTTPException(status_code=503, detail=f"Error de conexión del jurado externo: {e}") # Devuelvo un 503 para que Cloud Tasks reintente
     except httpx.HTTPStatusError as e:
         logger.warning(f"Worker: El jurado {task.urlJurado} respondió con error HTTP {e.response.status_code}. Reintentando...")
-        # Devolvemos el mismo error que el jurado para que Cloud Tasks reintente
-        raise HTTPException(status_code=e.response.status_code, detail=f"El jurado devolvió un error: {e.response.text}")
+        raise HTTPException(status_code =503, detail=f"El jurado devolvió un error: {e.response.text}") # Devolvemos el mismo error que el jurado para que Cloud Tasks reintente
 
 @app.get("/podhealth_split/{nombrePod}")
 async def ObtenerInfoPod(nombrePod: str):
