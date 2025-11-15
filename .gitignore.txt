@@ -1,0 +1,2 @@
+./venv
+Deployar contenedor Cloud Run 2.txt
