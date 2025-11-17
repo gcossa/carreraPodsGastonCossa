@@ -226,8 +226,6 @@ async def EliminarAntena(nombreAntena: str):
     if not await redisCliente.hexists("antenas", nombreAntena):
         raise HTTPException(status_code=404, detail=f"Antena '{nombreAntena}' no encontrada.")
     await redisCliente.hdel("antenas", nombreAntena) #Limpiar toda la indformación del Pod
-    await redisCliente.hdel("antenas", nombreAntena) #Limpiar toda la indformación del Pod
-    
     return {"message": f"Antena '{nombreAntena}' eliminada de Redis."}
 
 @app.delete("/podhealth_split/{nombrePod}")
