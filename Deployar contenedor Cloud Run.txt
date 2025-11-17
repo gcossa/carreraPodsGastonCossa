@@ -1,5 +1,0 @@
-1) Crear Dockerfile
-2) Construir imagen 
-	gcloud builds submit --tag gcr.io/[PROJECT_ID]/carrera-pods
-3) deployar imagen
-	gcloud run deploy carrera-pods-api  --image gcr.io/carrera-pods-gcossa/carrera-pods --platform managed --region us-central --allow-unauthenticated
